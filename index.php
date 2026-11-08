@@ -1,18 +1,18 @@
 <?php
 declare(strict_types=1);
 /*
- * Lab 01 - Student Registration
+ * Lab 02 - Library Borrowing
  * ONE FILE = everything: settings, helpers, HTML form (Task A), PHP validation (Task B),
  * database insert (Task C) and the extension page (open index.php?view=list).
  * Styling is in style.css, the database is created by database.sql.
  */
 
 /* ============ 1. SETTINGS (change the MySQL login here if needed; XAMPP default shown) ============ */
-$DB = ['host' => 'localhost', 'name' => 'lab01_students', 'user' => 'root', 'pass' => ''];
-$APP_TITLE = 'Lab 01 - Student Registration';
+$DB = ['host' => 'localhost', 'name' => 'lab02_library', 'user' => 'root', 'pass' => ''];
+$APP_TITLE = 'Lab 02 - Library Borrowing';
 $NAV = [
-    'index.php' => 'Register',
-    'index.php?view=list' => 'Search registrations',
+    'index.php' => 'Borrow a book',
+    'index.php?view=list' => 'Active loans',
 ];
 
 /* ============ 2. HELPER FUNCTIONS ============ */
@@ -153,104 +153,106 @@ function is_duplicate(PDOException $e): bool
 }
 
 /* ============ 5. LAB CONSTANTS AND FUNCTIONS ============ */
+const MAX_LOAN_DAYS = 30;   // assumption: the library lends for at most 30 days
+/** ISBN-10 (check digit may be X) or ISBN-13, with checksum. Input already stripped of spaces/hyphens. */
+function isbn_valid(string $s): bool
+{
+    if (preg_match('/^\d{9}[\dX]$/', $s)) {
+        $sum = 0;
+        for ($i = 0; $i < 10; $i++) { $sum += ($s[$i] === 'X' ? 10 : (int)$s[$i]) * (10 - $i); }
+        return $sum % 11 === 0;
+    }
+    if (preg_match('/^\d{13}$/', $s)) {
+        $sum = 0;
+        for ($i = 0; $i < 13; $i++) { $sum += (int)$s[$i] * ($i % 2 ? 3 : 1); }
+        return $sum % 10 === 0;
+    }
+    return false;
+}
 
 /* ============ 6. PROCESSING ============ */
 $view = (($_GET['view'] ?? '') === 'list') ? 'list' : 'form';
 
 if ($view === 'form') {
     // ---- the form: validate the POST and insert ----
-    $levels  = [1 => 'Year 1', 2 => 'Year 2', 3 => 'Year 3', 4 => 'Year 4'];
-    $genders = ['Male' => 'Male', 'Female' => 'Female'];
-    $programmes = [];
 
-    try {
-        $programmes = db()->query('SELECT id, name FROM programmes ORDER BY name')->fetchAll(PDO::FETCH_KEY_PAIR);
-    } catch (PDOException $ex) {
-        $errors['_form'] = db_fail($ex);
-    }
 
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($errors['_form'])) {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!csrf_ok()) {
             $errors['_form'] = 'Your session expired. Please reload the page and try again.';
         } else {
-            $name = post('full_name');
-            $email = strtolower(post('email'));
-            $phone = post('telephone');
-            $dob = post('date_of_birth');
-            $programme = post('programme');
-            $level = post('level');
-            $gender = post('gender');
+            $sid = strtoupper(post('student_id'));
+            $isbnRaw = post('isbn');
+            $isbn = strtoupper(preg_replace('/[\s-]/', '', $isbnRaw));
+            $title = post('book_title');
+            $borrow = post('borrow_date');
+            $due = post('due_date');
+            $days = post('loan_days');
+            $purpose = post('purpose');
 
-            // ---- Validation (server side) ----
-            if ($name === '') { $errors['full_name'] = 'Full name is required.'; }
-            elseif ($m = name_error($name)) { $errors['full_name'] = $m; }
+            if ($sid === '') { $errors['student_id'] = 'Student ID is required.'; }
+            elseif (!preg_match('/^[A-Z0-9-]{4,20}$/', $sid)) { $errors['student_id'] = 'Use 4-20 letters, digits or hyphens.'; }
 
-            if ($email === '') { $errors['email'] = 'Email address is required.'; }
-            elseif (mb_strlen($email) > 190 || !filter_var($email, FILTER_VALIDATE_EMAIL)) { $errors['email'] = 'Enter a valid email address (e.g. name@example.com).'; }
+            if ($isbnRaw === '') { $errors['isbn'] = 'ISBN is required.'; }
+            elseif (!isbn_valid($isbn)) { $errors['isbn'] = 'Enter a valid ISBN-10 (X allowed as last character) or ISBN-13.'; }
 
-            $phoneClean = null;
-            if ($phone === '') { $errors['telephone'] = 'Telephone is required.'; }
-            elseif (($phoneClean = normalise_phone($phone)) === null) { $errors['telephone'] = 'Enter 9 digits starting with 6 or 2 (e.g. 677 123 456).'; }
+            if ($title === '') { $errors['book_title'] = 'Book title is required.'; }
+            elseif (mb_strlen($title) < 2 || mb_strlen($title) > 200) { $errors['book_title'] = 'Title must be 2-200 characters.'; }
 
-            if ($dob === '') { $errors['date_of_birth'] = 'Date of birth is required.'; }
-            elseif (($d = parse_date($dob)) === null) { $errors['date_of_birth'] = 'Enter a real date (YYYY-MM-DD).'; }
-            elseif ($d >= today()) { $errors['date_of_birth'] = 'Date of birth must be in the past.'; }
-            elseif ($d < new DateTimeImmutable('1900-01-01')) { $errors['date_of_birth'] = 'Date of birth cannot be before 1900.'; }
+            $bd = $dd = null;
+            if ($borrow === '') { $errors['borrow_date'] = 'Borrow date is required.'; }
+            elseif (($bd = parse_date($borrow)) === null) { $errors['borrow_date'] = 'Enter a real date (YYYY-MM-DD).'; }
+            elseif ($bd > today()) { $errors['borrow_date'] = 'Borrow date cannot be in the future.'; }
 
-            if ($programme === '') { $errors['programme'] = 'Please choose a programme.'; }
-            elseif (!in_list($programme, $programmes)) { $errors['programme'] = 'Invalid programme selected.'; }
+            if ($due === '') { $errors['due_date'] = 'Return due date is required.'; }
+            elseif (($dd = parse_date($due)) === null) { $errors['due_date'] = 'Enter a real date (YYYY-MM-DD).'; }
+            elseif ($bd && $dd <= $bd) { $errors['due_date'] = 'Due date must be after the borrow date.'; }
 
-            if ($level === '') { $errors['level'] = 'Please choose a level.'; }
-            elseif (!in_list($level, $levels)) { $errors['level'] = 'Invalid level selected.'; }
+            $calc = ($bd && $dd && $dd > $bd) ? (int)$bd->diff($dd)->days : null;
+            if ($calc !== null && $calc > MAX_LOAN_DAYS) { $errors['due_date'] = 'Loans are limited to ' . MAX_LOAN_DAYS . ' days.'; }
+            if ($days !== '') {                       // optional: if given, it must match the dates
+                if (!preg_match('/^\d{1,3}$/', $days) || (int)$days < 1) { $errors['loan_days'] = 'Duration must be a whole number of days (1-' . MAX_LOAN_DAYS . ').'; }
+                elseif ($calc !== null && (int)$days !== $calc && !isset($errors['due_date'])) { $errors['loan_days'] = "Duration does not match the dates ($calc days)."; }
+            }
+            if (mb_strlen($purpose) > 255) { $errors['purpose'] = 'Purpose must be 255 characters or fewer.'; }
+            if (!checked('agree')) { $errors['agree'] = 'You must agree to the library rules.'; }
 
-            if ($gender !== '' && !in_list($gender, $genders)) { $errors['gender'] = 'Invalid gender option.'; }
-
-            if (!checked('policy')) { $errors['policy'] = 'You must accept the registration policy.'; }
-
-            // ---- Duplicate e-mail check, then insert ----
             if (!$errors) {
                 try {
-                    $st = db()->prepare('SELECT 1 FROM students WHERE email = ?');
-                    $st->execute([$email]);
+                    $st = db()->prepare('SELECT loan_id FROM loans WHERE student_id = ? AND isbn = ? AND is_active = 1');
+                    $st->execute([$sid, $isbn]);
                     if ($st->fetchColumn()) {
-                        $errors['email'] = 'This email is already registered. Nothing was saved.';
+                        $errors['isbn'] = 'This student already has an active loan for this book. Nothing was saved.';
                     } else {
-                        $ins = db()->prepare('INSERT INTO students (full_name, email, telephone, date_of_birth, programme_id, level, gender, policy_accepted)
+                        $ins = db()->prepare('INSERT INTO loans (student_id, isbn, book_title, borrow_date, due_date, loan_days, purpose, rules_accepted)
                                               VALUES (?, ?, ?, ?, ?, ?, ?, 1)');
-                        $ok = $ins->execute([$name, $email, $phoneClean, $dob, (int)$programme, (int)$level, $gender === '' ? null : $gender]);
-                        if ($ok && $ins->rowCount() === 1) {          // success only after a confirmed insert
-                            flash_set('Registration successful. Student record #' . db()->lastInsertId() . ' was saved.');
+                        $ok = $ins->execute([$sid, $isbn, $title, $borrow, $due, $calc, $purpose === '' ? null : $purpose]);
+                        if ($ok && $ins->rowCount() === 1) {
+                            flash_set('Loan recorded. Loan ID #' . db()->lastInsertId() . ', due on ' . $due . '.');
                             header('Location: index.php');
                             exit;
                         }
-                        $errors['_form'] = 'The record could not be saved. Please try again.';
+                        $errors['_form'] = 'The loan could not be saved. Please try again.';
                     }
                 } catch (PDOException $ex) {
-                    $errors[is_duplicate($ex) ? 'email' : '_form'] = is_duplicate($ex)
-                        ? 'This email is already registered. Nothing was saved.' : db_fail($ex);
+                    if (is_duplicate($ex)) { $errors['isbn'] = 'This student already has an active loan for this book. Nothing was saved.'; }
+                    else { $errors['_form'] = db_fail($ex); }
                 }
             }
         }
     }
 } else {
     // ---- extension challenge page ----
-    // Extension challenge: searchable list of registrations (name, email, programme).
-    $q = isset($_GET['q']) && is_string($_GET['q']) ? trim($_GET['q']) : '';
+    // Extension challenge: current active loans and their due dates (soonest first).
     $rows = [];
     $problem = null;
     try {
-        $sql = 'SELECT s.id, s.full_name, s.email, s.telephone, s.date_of_birth, p.name AS programme,
-                       CONCAT("Year ", s.level) AS level, s.gender, s.created_at
-                FROM students s JOIN programmes p ON p.id = s.programme_id';
-        $params = [];
-        if ($q !== '') {
-            $sql .= ' WHERE s.full_name LIKE ? OR s.email LIKE ? OR p.name LIKE ?';
-            $like = '%' . addcslashes($q, '%_\\') . '%';
-            $params = [$like, $like, $like];
-        }
-        $st = db()->prepare($sql . ' ORDER BY s.created_at DESC, s.id DESC LIMIT 200');
-        $st->execute($params);
-        $rows = $st->fetchAll();
+        $rows = db()->query(
+            "SELECT loan_id, student_id, isbn, book_title, borrow_date, due_date,
+                    DATEDIFF(due_date, CURDATE()) AS days_left,
+                    CASE WHEN due_date < CURDATE() THEN 'OVERDUE' ELSE 'On time' END AS state
+             FROM loans WHERE is_active = 1 ORDER BY due_date ASC, loan_id ASC"
+        )->fetchAll();
     } catch (PDOException $ex) {
         $problem = db_fail($ex);
     }
@@ -258,7 +260,7 @@ if ($view === 'form') {
 }
 
 /* ============ 7. THE PAGE (HTML) ============ */
-$pageTitle = ($view === 'list') ? 'Registered Students' : 'Student Registration';
+$pageTitle = ($view === 'list') ? 'Active Loans' : 'Library Book Borrowing';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -283,22 +285,15 @@ $pageTitle = ($view === 'list') ? 'Registered Students' : 'Student Registration'
     <?php flash_show(); form_error_show(); ?>
 
 <?php if ($view === 'list'): ?>
-<form class="search" method="get" action="index.php" role="search">
-    <input type="hidden" name="view" value="list">
-    <label for="q" class="muted">Search</label>
-    <input type="text" id="q" name="q" value="<?= e($q) ?>" placeholder="Name, email or programme">
-    <button type="submit" class="primary">Search</button>
-</form>
-
 <?php if (!$rows): ?>
-    <p class="muted">No records found.</p>
+    <p class="muted">There are no active loans.</p>
 <?php else: ?>
     <div class="table-wrap">
         <table>
-            <thead><tr><th scope="col">ID</th><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Phone</th><th scope="col">Date of birth</th><th scope="col">Programme</th><th scope="col">Level</th><th scope="col">Gender</th><th scope="col">Registered at</th></tr></thead>
+            <thead><tr><th scope="col">Loan ID</th><th scope="col">Student</th><th scope="col">ISBN</th><th scope="col">Title</th><th scope="col">Borrowed</th><th scope="col">Due date</th><th scope="col">Days left</th><th scope="col">Status</th></tr></thead>
             <tbody>
             <?php foreach ($rows as $r): ?>
-                <tr><td><?= e($r['id']) ?></td><td><?= e($r['full_name']) ?></td><td><?= e($r['email']) ?></td><td><?= e($r['telephone']) ?></td><td><?= e($r['date_of_birth']) ?></td><td><?= e($r['programme']) ?></td><td><?= e($r['level']) ?></td><td><?= e($r['gender']) ?></td><td><?= e($r['created_at']) ?></td></tr>
+                <tr><td><?= e($r['loan_id']) ?></td><td><?= e($r['student_id']) ?></td><td><?= e($r['isbn']) ?></td><td><?= e($r['book_title']) ?></td><td><?= e($r['borrow_date']) ?></td><td><?= e($r['due_date']) ?></td><td><?= e($r['days_left']) ?></td><td><?= e($r['state']) ?></td></tr>
             <?php endforeach; ?>
             </tbody>
         </table>
@@ -309,68 +304,52 @@ $pageTitle = ($view === 'list') ? 'Registered Students' : 'Student Registration'
 <form method="post" action="index.php" novalidate>
     <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
 
-    <div class="field<?= cls('full_name') ?>">
-        <label for="full_name">Full name <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="full_name" name="full_name" value="<?= val('full_name') ?>" maxlength="80" autocomplete="name" required<?= aria('full_name') ?>>
-        <?= err('full_name') ?>
+    <div class="field<?= cls('student_id') ?>">
+        <label for="student_id">Student ID <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="student_id" name="student_id" value="<?= val('student_id') ?>" maxlength="20" required<?= aria('student_id') ?>>
+        <?= err('student_id') ?>
     </div>
 
-    <div class="field<?= cls('email') ?>">
-        <label for="email">Email address <span class="req" aria-hidden="true">*</span></label>
-        <input type="email" id="email" name="email" value="<?= val('email') ?>" maxlength="190" autocomplete="email" required<?= aria('email') ?>>
-        <?= err('email') ?>
+    <div class="field<?= cls('isbn') ?>">
+        <label for="isbn">Book ISBN <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="isbn" name="isbn" value="<?= val('isbn') ?>" maxlength="17" placeholder="978-0-306-40615-7" required<?= aria('isbn') ?>>
+        <?= err('isbn') ?>
     </div>
 
-    <div class="field<?= cls('telephone') ?>">
-        <label for="telephone">Telephone <span class="req" aria-hidden="true">*</span></label>
-        <input type="tel" id="telephone" name="telephone" value="<?= val('telephone') ?>" placeholder="6XX XXX XXX" autocomplete="tel" required<?= aria('telephone') ?>>
-        <?= err('telephone') ?>
+    <div class="field<?= cls('book_title') ?>">
+        <label for="book_title">Book title <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="book_title" name="book_title" value="<?= val('book_title') ?>" maxlength="200" required<?= aria('book_title') ?>>
+        <?= err('book_title') ?>
     </div>
 
-    <div class="field<?= cls('date_of_birth') ?>">
-        <label for="date_of_birth">Date of birth <span class="req" aria-hidden="true">*</span></label>
-        <input type="date" id="date_of_birth" name="date_of_birth" value="<?= val('date_of_birth') ?>" max="<?= e(today()->modify('-1 day')->format('Y-m-d')) ?>" required<?= aria('date_of_birth') ?>>
-        <?= err('date_of_birth') ?>
+    <div class="field<?= cls('borrow_date') ?>">
+        <label for="borrow_date">Borrow date <span class="req" aria-hidden="true">*</span></label>
+        <input type="date" id="borrow_date" name="borrow_date" value="<?= val('borrow_date') ?>" max="<?= e(today()->format('Y-m-d')) ?>" required<?= aria('borrow_date') ?>>
+        <?= err('borrow_date') ?>
     </div>
 
-    <div class="field<?= cls('programme') ?>">
-        <label for="programme">Programme <span class="req" aria-hidden="true">*</span></label>
-        <select id="programme" name="programme" required<?= aria('programme') ?>>
-            <option value="">Choose an option</option>
-            <?php foreach ($programmes as $v => $l): ?>
-                <option value="<?= e($v) ?>"<?= sel('programme', (string)$v) ?>><?= e($l) ?></option>
-            <?php endforeach; ?>
-        </select>
-        <?= err('programme') ?>
+    <div class="field<?= cls('due_date') ?>">
+        <label for="due_date">Return due date <span class="req" aria-hidden="true">*</span></label>
+        <input type="date" id="due_date" name="due_date" value="<?= val('due_date') ?>" required<?= aria('due_date') ?>>
+        <?= err('due_date') ?>
     </div>
 
-    <div class="field<?= cls('level') ?>">
-        <label for="level">Level <span class="req" aria-hidden="true">*</span></label>
-        <select id="level" name="level" required<?= aria('level') ?>>
-            <option value="">Choose an option</option>
-            <?php foreach ($levels as $v => $l): ?>
-                <option value="<?= e($v) ?>"<?= sel('level', (string)$v) ?>><?= e($l) ?></option>
-            <?php endforeach; ?>
-        </select>
-        <?= err('level') ?>
+    <div class="field<?= cls('loan_days') ?>">
+        <label for="loan_days">Loan duration (days)</label>
+        <input type="number" id="loan_days" name="loan_days" value="<?= val('loan_days') ?>" min="1" max="<?= MAX_LOAN_DAYS ?>" placeholder="Optional - calculated from the dates"<?= aria('loan_days') ?>>
+        <?= err('loan_days') ?>
     </div>
 
-    <div class="field<?= cls('gender') ?>">
-        <fieldset>
-            <legend>Gender</legend>
-            <div class="choices">
-                <?php foreach ($genders as $v => $l): ?>
-                    <label class="inline"><input type="radio" name="gender" value="<?= e($v) ?>"<?= chkd('gender', (string)$v) ?>> <?= e($l) ?></label>
-                <?php endforeach; ?>
-            </div>
-        </fieldset>
-        <?= err('gender') ?>
+    <div class="field<?= cls('purpose') ?>">
+        <label for="purpose">Borrowing purpose</label>
+        <input type="text" id="purpose" name="purpose" value="<?= val('purpose') ?>" maxlength="255"<?= aria('purpose') ?>>
+        <?= err('purpose') ?>
     </div>
 
-    <div class="field<?= cls('policy') ?>">
-        <span class="legend">Accept registration policy <span class="req" aria-hidden="true">*</span></span>
-        <label class="inline" for="policy"><input type="checkbox" id="policy" name="policy" value="1"<?= chkd('policy') ?><?= aria('policy') ?>> I agree</label>
-        <?= err('policy') ?>
+    <div class="field<?= cls('agree') ?>">
+        <span class="legend">Agree to library rules <span class="req" aria-hidden="true">*</span></span>
+        <label class="inline" for="agree"><input type="checkbox" id="agree" name="agree" value="1"<?= chkd('agree') ?><?= aria('agree') ?>> I agree</label>
+        <?= err('agree') ?>
     </div>
 
     <div class="buttons">
