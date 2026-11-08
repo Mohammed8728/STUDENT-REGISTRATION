@@ -1,18 +1,18 @@
 <?php
 declare(strict_types=1);
 /*
- * Lab 02 - Library Borrowing
+ * Lab 03 - Clinic Appointments
  * ONE FILE = everything: settings, helpers, HTML form (Task A), PHP validation (Task B),
  * database insert (Task C) and the extension page (open index.php?view=list).
  * Styling is in style.css, the database is created by database.sql.
  */
 
 /* ============ 1. SETTINGS (change the MySQL login here if needed; XAMPP default shown) ============ */
-$DB = ['host' => 'localhost', 'name' => 'lab02_library', 'user' => 'root', 'pass' => ''];
-$APP_TITLE = 'Lab 02 - Library Borrowing';
+$DB = ['host' => 'localhost', 'name' => 'lab03_clinic', 'user' => 'root', 'pass' => ''];
+$APP_TITLE = 'Lab 03 - Clinic Appointments';
 $NAV = [
-    'index.php' => 'Borrow a book',
-    'index.php?view=list' => 'Active loans',
+    'index.php' => 'Book appointment',
+    'index.php?view=list' => 'Schedule by doctor',
 ];
 
 /* ============ 2. HELPER FUNCTIONS ============ */
@@ -153,89 +153,87 @@ function is_duplicate(PDOException $e): bool
 }
 
 /* ============ 5. LAB CONSTANTS AND FUNCTIONS ============ */
-const MAX_LOAN_DAYS = 30;   // assumption: the library lends for at most 30 days
-/** ISBN-10 (check digit may be X) or ISBN-13, with checksum. Input already stripped of spaces/hyphens. */
-function isbn_valid(string $s): bool
-{
-    if (preg_match('/^\d{9}[\dX]$/', $s)) {
-        $sum = 0;
-        for ($i = 0; $i < 10; $i++) { $sum += ($s[$i] === 'X' ? 10 : (int)$s[$i]) * (10 - $i); }
-        return $sum % 11 === 0;
-    }
-    if (preg_match('/^\d{13}$/', $s)) {
-        $sum = 0;
-        for ($i = 0; $i < 13; $i++) { $sum += (int)$s[$i] * ($i % 2 ? 3 : 1); }
-        return $sum % 10 === 0;
-    }
-    return false;
-}
 
 /* ============ 6. PROCESSING ============ */
 $view = (($_GET['view'] ?? '') === 'list') ? 'list' : 'form';
 
 if ($view === 'form') {
     // ---- the form: validate the POST and insert ----
+    $slots = ['08:00' => '08:00', '09:00' => '09:00', '10:00' => '10:00', '11:00' => '11:00',
+              '14:00' => '14:00', '15:00' => '15:00', '16:00' => '16:00'];
+    $departments = $doctorLabels = $doctorDept = [];
 
+    try {
+        $departments = db()->query('SELECT id, name FROM departments ORDER BY name')->fetchAll(PDO::FETCH_KEY_PAIR);
+        foreach (db()->query('SELECT d.id, d.full_name, d.department_id, p.name AS dept FROM doctors d JOIN departments p ON p.id = d.department_id ORDER BY d.full_name') as $r) {
+            $doctorLabels[$r['id']] = $r['full_name'] . ' (' . $r['dept'] . ')';
+            $doctorDept[$r['id']] = (string)$r['department_id'];
+        }
+    } catch (PDOException $ex) {
+        $errors['_form'] = db_fail($ex);
+    }
 
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($errors['_form'])) {
         if (!csrf_ok()) {
             $errors['_form'] = 'Your session expired. Please reload the page and try again.';
         } else {
-            $sid = strtoupper(post('student_id'));
-            $isbnRaw = post('isbn');
-            $isbn = strtoupper(preg_replace('/[\s-]/', '', $isbnRaw));
-            $title = post('book_title');
-            $borrow = post('borrow_date');
-            $due = post('due_date');
-            $days = post('loan_days');
-            $purpose = post('purpose');
+            $name = post('patient_name');
+            $email = strtolower(post('email'));
+            $phone = post('phone');
+            $dept = post('department');
+            $doctor = post('doctor');
+            $date = post('appointment_date');
+            $slot = post('time_slot');
+            $reason = post('reason');
 
-            if ($sid === '') { $errors['student_id'] = 'Student ID is required.'; }
-            elseif (!preg_match('/^[A-Z0-9-]{4,20}$/', $sid)) { $errors['student_id'] = 'Use 4-20 letters, digits or hyphens.'; }
+            if ($name === '') { $errors['patient_name'] = 'Patient name is required.'; }
+            elseif ($m = name_error($name)) { $errors['patient_name'] = $m; }
 
-            if ($isbnRaw === '') { $errors['isbn'] = 'ISBN is required.'; }
-            elseif (!isbn_valid($isbn)) { $errors['isbn'] = 'Enter a valid ISBN-10 (X allowed as last character) or ISBN-13.'; }
+            if ($email !== '' && (mb_strlen($email) > 190 || !filter_var($email, FILTER_VALIDATE_EMAIL))) { $errors['email'] = 'Enter a valid email address or leave it empty.'; }
 
-            if ($title === '') { $errors['book_title'] = 'Book title is required.'; }
-            elseif (mb_strlen($title) < 2 || mb_strlen($title) > 200) { $errors['book_title'] = 'Title must be 2-200 characters.'; }
+            $phoneClean = null;
+            if ($phone === '') { $errors['phone'] = 'Phone is required.'; }
+            elseif (($phoneClean = normalise_phone($phone)) === null) { $errors['phone'] = 'Enter 9 digits starting with 6 or 2 (e.g. 677 123 456).'; }
 
-            $bd = $dd = null;
-            if ($borrow === '') { $errors['borrow_date'] = 'Borrow date is required.'; }
-            elseif (($bd = parse_date($borrow)) === null) { $errors['borrow_date'] = 'Enter a real date (YYYY-MM-DD).'; }
-            elseif ($bd > today()) { $errors['borrow_date'] = 'Borrow date cannot be in the future.'; }
+            if ($dept === '') { $errors['department'] = 'Please choose a department.'; }
+            elseif (!in_list($dept, $departments)) { $errors['department'] = 'Invalid department selected.'; }
 
-            if ($due === '') { $errors['due_date'] = 'Return due date is required.'; }
-            elseif (($dd = parse_date($due)) === null) { $errors['due_date'] = 'Enter a real date (YYYY-MM-DD).'; }
-            elseif ($bd && $dd <= $bd) { $errors['due_date'] = 'Due date must be after the borrow date.'; }
+            if ($doctor === '') { $errors['doctor'] = 'Please choose a doctor.'; }
+            elseif (!in_list($doctor, $doctorLabels)) { $errors['doctor'] = 'Invalid doctor selected.'; }
+            elseif (!isset($errors['department']) && $doctorDept[$doctor] !== $dept) { $errors['doctor'] = 'This doctor does not work in the selected department.'; }
 
-            $calc = ($bd && $dd && $dd > $bd) ? (int)$bd->diff($dd)->days : null;
-            if ($calc !== null && $calc > MAX_LOAN_DAYS) { $errors['due_date'] = 'Loans are limited to ' . MAX_LOAN_DAYS . ' days.'; }
-            if ($days !== '') {                       // optional: if given, it must match the dates
-                if (!preg_match('/^\d{1,3}$/', $days) || (int)$days < 1) { $errors['loan_days'] = 'Duration must be a whole number of days (1-' . MAX_LOAN_DAYS . ').'; }
-                elseif ($calc !== null && (int)$days !== $calc && !isset($errors['due_date'])) { $errors['loan_days'] = "Duration does not match the dates ($calc days)."; }
-            }
-            if (mb_strlen($purpose) > 255) { $errors['purpose'] = 'Purpose must be 255 characters or fewer.'; }
-            if (!checked('agree')) { $errors['agree'] = 'You must agree to the library rules.'; }
+            if ($date === '') { $errors['appointment_date'] = 'Appointment date is required.'; }
+            elseif (parse_date($date) === null) { $errors['appointment_date'] = 'Enter a real date (YYYY-MM-DD).'; }
+            elseif (parse_date($date) <= today()) { $errors['appointment_date'] = 'The appointment must be on a future date.'; }
+
+            if ($slot === '') { $errors['time_slot'] = 'Please choose a time slot.'; }
+            elseif (!in_list($slot, $slots)) { $errors['time_slot'] = 'Invalid time slot selected.'; }
+
+            $len = mb_strlen($reason);
+            if ($reason === '') { $errors['reason'] = 'Symptoms or reason is required.'; }
+            elseif ($len < 10 || $len > 500) { $errors['reason'] = "Must be between 10 and 500 characters (currently $len)."; }
+
+            if (!checked('consent')) { $errors['consent'] = 'Consent to data use is required.'; }
 
             if (!$errors) {
                 try {
-                    $st = db()->prepare('SELECT loan_id FROM loans WHERE student_id = ? AND isbn = ? AND is_active = 1');
-                    $st->execute([$sid, $isbn]);
+                    $st = db()->prepare('SELECT 1 FROM appointments WHERE doctor_id = ? AND appointment_date = ? AND time_slot = ?');
+                    $st->execute([(int)$doctor, $date, $slot . ':00']);
                     if ($st->fetchColumn()) {
-                        $errors['isbn'] = 'This student already has an active loan for this book. Nothing was saved.';
+                        $errors['time_slot'] = 'That doctor is already booked for this date and slot. Choose another slot. Nothing was saved.';
                     } else {
-                        $ins = db()->prepare('INSERT INTO loans (student_id, isbn, book_title, borrow_date, due_date, loan_days, purpose, rules_accepted)
-                                              VALUES (?, ?, ?, ?, ?, ?, ?, 1)');
-                        $ok = $ins->execute([$sid, $isbn, $title, $borrow, $due, $calc, $purpose === '' ? null : $purpose]);
+                        $ins = db()->prepare("INSERT INTO appointments (patient_name, email, phone, department_id, doctor_id, appointment_date, time_slot, reason, consent, status)
+                                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'Pending')");
+                        $ok = $ins->execute([$name, $email === '' ? null : $email, $phoneClean, (int)$dept, (int)$doctor, $date, $slot . ':00', $reason]);
                         if ($ok && $ins->rowCount() === 1) {
-                            flash_set('Loan recorded. Loan ID #' . db()->lastInsertId() . ', due on ' . $due . '.');
+                            flash_set('Appointment request #' . db()->lastInsertId() . ' saved with status Pending.');
                             header('Location: index.php');
                             exit;
                         }
-                        $errors['_form'] = 'The loan could not be saved. Please try again.';
+                        $errors['_form'] = 'The appointment could not be saved. Please try again.';
                     }
                 } catch (PDOException $ex) {
-                    if (is_duplicate($ex)) { $errors['isbn'] = 'This student already has an active loan for this book. Nothing was saved.'; }
+                    if (is_duplicate($ex)) { $errors['time_slot'] = 'That doctor is already booked for this date and slot. Nothing was saved.'; }
                     else { $errors['_form'] = db_fail($ex); }
                 }
             }
@@ -243,16 +241,20 @@ if ($view === 'form') {
     }
 } else {
     // ---- extension challenge page ----
-    // Extension challenge: current active loans and their due dates (soonest first).
-    $rows = [];
+    // Extension challenge: simple appointment schedule grouped by doctor.
+    $filter = isset($_GET['doctor']) && ctype_digit((string)$_GET['doctor']) ? (int)$_GET['doctor'] : 0;
+    $doctors = $byDoctor = [];
     $problem = null;
     try {
-        $rows = db()->query(
-            "SELECT loan_id, student_id, isbn, book_title, borrow_date, due_date,
-                    DATEDIFF(due_date, CURDATE()) AS days_left,
-                    CASE WHEN due_date < CURDATE() THEN 'OVERDUE' ELSE 'On time' END AS state
-             FROM loans WHERE is_active = 1 ORDER BY due_date ASC, loan_id ASC"
-        )->fetchAll();
+        $doctors = db()->query('SELECT id, full_name FROM doctors ORDER BY full_name')->fetchAll(PDO::FETCH_KEY_PAIR);
+        $sql = 'SELECT d.id AS doctor_id, d.full_name AS doctor, a.appointment_date, TIME_FORMAT(a.time_slot, "%H:%i") AS slot,
+                       a.patient_name, a.status, a.id
+                FROM appointments a JOIN doctors d ON d.id = a.doctor_id';
+        $params = [];
+        if ($filter > 0) { $sql .= ' WHERE d.id = ?'; $params[] = $filter; }
+        $st = db()->prepare($sql . ' ORDER BY d.full_name, a.appointment_date, a.time_slot');
+        $st->execute($params);
+        foreach ($st as $r) { $byDoctor[$r['doctor']][] = $r; }
     } catch (PDOException $ex) {
         $problem = db_fail($ex);
     }
@@ -260,7 +262,7 @@ if ($view === 'form') {
 }
 
 /* ============ 7. THE PAGE (HTML) ============ */
-$pageTitle = ($view === 'list') ? 'Active Loans' : 'Library Book Borrowing';
+$pageTitle = ($view === 'list') ? 'Appointment Schedule by Doctor' : 'Clinic Appointment Booking';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -285,71 +287,110 @@ $pageTitle = ($view === 'list') ? 'Active Loans' : 'Library Book Borrowing';
     <?php flash_show(); form_error_show(); ?>
 
 <?php if ($view === 'list'): ?>
+<form class="search" method="get" action="index.php">
+    <input type="hidden" name="view" value="list">
+    <label for="doctor" class="muted">Doctor</label>
+    <select id="doctor" name="doctor">
+        <option value="0">All doctors</option>
+        <?php foreach ($doctors as $id => $n): ?>
+            <option value="<?= e($id) ?>"<?= $filter === (int)$id ? ' selected' : '' ?>><?= e($n) ?></option>
+        <?php endforeach; ?>
+    </select>
+    <button type="submit" class="primary">Show</button>
+</form>
+
+<?php if (!$byDoctor): ?>
+    <p class="muted">No appointments booked.</p>
+<?php endif; ?>
+<?php foreach ($byDoctor as $doctor => $rows): ?>
+    <h2><?= e($doctor) ?></h2>
 <?php if (!$rows): ?>
-    <p class="muted">There are no active loans.</p>
+    <p class="muted">No records found.</p>
 <?php else: ?>
     <div class="table-wrap">
         <table>
-            <thead><tr><th scope="col">Loan ID</th><th scope="col">Student</th><th scope="col">ISBN</th><th scope="col">Title</th><th scope="col">Borrowed</th><th scope="col">Due date</th><th scope="col">Days left</th><th scope="col">Status</th></tr></thead>
+            <thead><tr><th scope="col">Date</th><th scope="col">Time</th><th scope="col">Patient</th><th scope="col">Status</th><th scope="col">Ref #</th></tr></thead>
             <tbody>
             <?php foreach ($rows as $r): ?>
-                <tr><td><?= e($r['loan_id']) ?></td><td><?= e($r['student_id']) ?></td><td><?= e($r['isbn']) ?></td><td><?= e($r['book_title']) ?></td><td><?= e($r['borrow_date']) ?></td><td><?= e($r['due_date']) ?></td><td><?= e($r['days_left']) ?></td><td><?= e($r['state']) ?></td></tr>
+                <tr><td><?= e($r['appointment_date']) ?></td><td><?= e($r['slot']) ?></td><td><?= e($r['patient_name']) ?></td><td><?= e($r['status']) ?></td><td><?= e($r['id']) ?></td></tr>
             <?php endforeach; ?>
             </tbody>
         </table>
     </div>
     <p class="muted"><?= count($rows) ?> record(s).</p>
 <?php endif; ?>
+<?php endforeach; ?>
 <?php else: ?>
 <form method="post" action="index.php" novalidate>
     <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
 
-    <div class="field<?= cls('student_id') ?>">
-        <label for="student_id">Student ID <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="student_id" name="student_id" value="<?= val('student_id') ?>" maxlength="20" required<?= aria('student_id') ?>>
-        <?= err('student_id') ?>
+    <div class="field<?= cls('patient_name') ?>">
+        <label for="patient_name">Patient name <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="patient_name" name="patient_name" value="<?= val('patient_name') ?>" maxlength="80" autocomplete="name" required<?= aria('patient_name') ?>>
+        <?= err('patient_name') ?>
     </div>
 
-    <div class="field<?= cls('isbn') ?>">
-        <label for="isbn">Book ISBN <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="isbn" name="isbn" value="<?= val('isbn') ?>" maxlength="17" placeholder="978-0-306-40615-7" required<?= aria('isbn') ?>>
-        <?= err('isbn') ?>
+    <div class="field<?= cls('email') ?>">
+        <label for="email">Email (optional)</label>
+        <input type="email" id="email" name="email" value="<?= val('email') ?>" maxlength="190"<?= aria('email') ?>>
+        <?= err('email') ?>
     </div>
 
-    <div class="field<?= cls('book_title') ?>">
-        <label for="book_title">Book title <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="book_title" name="book_title" value="<?= val('book_title') ?>" maxlength="200" required<?= aria('book_title') ?>>
-        <?= err('book_title') ?>
+    <div class="field<?= cls('phone') ?>">
+        <label for="phone">Phone <span class="req" aria-hidden="true">*</span></label>
+        <input type="tel" id="phone" name="phone" value="<?= val('phone') ?>" placeholder="6XX XXX XXX" required<?= aria('phone') ?>>
+        <?= err('phone') ?>
     </div>
 
-    <div class="field<?= cls('borrow_date') ?>">
-        <label for="borrow_date">Borrow date <span class="req" aria-hidden="true">*</span></label>
-        <input type="date" id="borrow_date" name="borrow_date" value="<?= val('borrow_date') ?>" max="<?= e(today()->format('Y-m-d')) ?>" required<?= aria('borrow_date') ?>>
-        <?= err('borrow_date') ?>
+    <div class="field<?= cls('department') ?>">
+        <label for="department">Department <span class="req" aria-hidden="true">*</span></label>
+        <select id="department" name="department" required<?= aria('department') ?>>
+            <option value="">Choose an option</option>
+            <?php foreach ($departments as $v => $l): ?>
+                <option value="<?= e($v) ?>"<?= sel('department', (string)$v) ?>><?= e($l) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <?= err('department') ?>
     </div>
 
-    <div class="field<?= cls('due_date') ?>">
-        <label for="due_date">Return due date <span class="req" aria-hidden="true">*</span></label>
-        <input type="date" id="due_date" name="due_date" value="<?= val('due_date') ?>" required<?= aria('due_date') ?>>
-        <?= err('due_date') ?>
+    <div class="field<?= cls('doctor') ?>">
+        <label for="doctor">Preferred doctor <span class="req" aria-hidden="true">*</span></label>
+        <select id="doctor" name="doctor" required<?= aria('doctor') ?>>
+            <option value="">Choose an option</option>
+            <?php foreach ($doctorLabels as $v => $l): ?>
+                <option value="<?= e($v) ?>"<?= sel('doctor', (string)$v) ?>><?= e($l) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <?= err('doctor') ?>
     </div>
 
-    <div class="field<?= cls('loan_days') ?>">
-        <label for="loan_days">Loan duration (days)</label>
-        <input type="number" id="loan_days" name="loan_days" value="<?= val('loan_days') ?>" min="1" max="<?= MAX_LOAN_DAYS ?>" placeholder="Optional - calculated from the dates"<?= aria('loan_days') ?>>
-        <?= err('loan_days') ?>
+    <div class="field<?= cls('appointment_date') ?>">
+        <label for="appointment_date">Appointment date <span class="req" aria-hidden="true">*</span></label>
+        <input type="date" id="appointment_date" name="appointment_date" value="<?= val('appointment_date') ?>" min="<?= e(today()->modify('+1 day')->format('Y-m-d')) ?>" required<?= aria('appointment_date') ?>>
+        <?= err('appointment_date') ?>
     </div>
 
-    <div class="field<?= cls('purpose') ?>">
-        <label for="purpose">Borrowing purpose</label>
-        <input type="text" id="purpose" name="purpose" value="<?= val('purpose') ?>" maxlength="255"<?= aria('purpose') ?>>
-        <?= err('purpose') ?>
+    <div class="field<?= cls('time_slot') ?>">
+        <label for="time_slot">Time slot <span class="req" aria-hidden="true">*</span></label>
+        <select id="time_slot" name="time_slot" required<?= aria('time_slot') ?>>
+            <option value="">Choose an option</option>
+            <?php foreach ($slots as $v => $l): ?>
+                <option value="<?= e($v) ?>"<?= sel('time_slot', (string)$v) ?>><?= e($l) ?></option>
+            <?php endforeach; ?>
+        </select>
+        <?= err('time_slot') ?>
     </div>
 
-    <div class="field<?= cls('agree') ?>">
-        <span class="legend">Agree to library rules <span class="req" aria-hidden="true">*</span></span>
-        <label class="inline" for="agree"><input type="checkbox" id="agree" name="agree" value="1"<?= chkd('agree') ?><?= aria('agree') ?>> I agree</label>
-        <?= err('agree') ?>
+    <div class="field<?= cls('reason') ?>">
+        <label for="reason">Symptoms or reason <span class="req" aria-hidden="true">*</span></label>
+        <textarea id="reason" name="reason" rows="4" maxlength="500" placeholder="10 to 500 characters" required<?= aria('reason') ?>><?= val('reason') ?></textarea>
+        <?= err('reason') ?>
+    </div>
+
+    <div class="field<?= cls('consent') ?>">
+        <span class="legend">Consent to data use <span class="req" aria-hidden="true">*</span></span>
+        <label class="inline" for="consent"><input type="checkbox" id="consent" name="consent" value="1"<?= chkd('consent') ?><?= aria('consent') ?>> I agree</label>
+        <?= err('consent') ?>
     </div>
 
     <div class="buttons">
@@ -357,6 +398,7 @@ $pageTitle = ($view === 'list') ? 'Active Loans' : 'Library Book Borrowing';
         <button type="reset" class="secondary">Reset</button>
     </div>
 </form>
+<p class="muted">Use fictional data only when testing. Do not enter real patient information.</p>
 <?php endif; ?>
 </main>
 </body>

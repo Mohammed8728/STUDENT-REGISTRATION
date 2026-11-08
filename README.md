@@ -1,4 +1,4 @@
-# Lab 02 - Library Book Borrowing
+# Lab 03 - Clinic Appointment Booking
 PHP 8 + MySQL/MariaDB, PDO prepared statements, server-side validation.
 
 ## Files in this folder (only 4)
@@ -6,31 +6,32 @@ PHP 8 + MySQL/MariaDB, PDO prepared statements, server-side validation.
 |---|---|
 | `index.php` | Everything in one file: MySQL login (top of the file), the HTML form (Task A), PHP validation (Task B), database insert (Task C) and the extension page (open `index.php?view=list`). |
 | `style.css` | All the CSS |
-| `database.sql` | Database `lab02_library`: tables, constraints and sample data |
+| `database.sql` | Database `lab03_clinic`: tables, constraints and sample data |
 | `README.md` | This file |
 
 ## Setup (XAMPP on Windows)
 1. Start **Apache** and **MySQL** in the XAMPP Control Panel.
-2. Copy this folder (`lab02_library_borrowing`) into `C:\xampp\htdocs\`.
-3. Open **http://localhost/phpmyadmin** > **Import** > choose `database.sql` > **Go**. (It creates the database `lab02_library`; importing twice is safe.)
-4. Open **http://localhost/lab02_library_borrowing/** in the browser.
+2. Copy this folder (`lab03_clinic_appointments`) into `C:\xampp\htdocs\`.
+3. Open **http://localhost/phpmyadmin** > **Import** > choose `database.sql` > **Go**. (It creates the database `lab03_clinic`; importing twice is safe.)
+4. Open **http://localhost/lab03_clinic_appointments/** in the browser.
 5. If your MySQL account is not `root` with an empty password, change the `$DB` line at the top of `index.php`.
 
 Requires PHP 8.1+ with `pdo_mysql`, `mbstring` and `fileinfo` (all enabled in XAMPP by default).
 
 ## Validation rules
-- Student ID, ISBN, title, borrow date and due date: mandatory.
-- Student ID: 4-20 letters, digits or hyphens (stored upper-case).
-- ISBN: hyphens/spaces ignored; ISBN-10 (last character may be X) or ISBN-13, and the check digit must be correct.
-- Borrow date: real date, not in the future. Due date: real date, strictly after the borrow date.
-- Loan duration: optional; if given it must equal the number of days between the dates. If empty it is calculated. Assumption: maximum loan is 30 days.
-- Purpose: optional, max 255 characters. Agreement to library rules: mandatory.
-- ACTIVE LOAN (defined): a loan is active while `is_active = 1` (not returned). Returning a book sets `is_active = NULL` and `returned_date`. A second ACTIVE loan of the same book by the same student is rejected (application check + UNIQUE key).
+- Patient name (3-80 chars, letters), phone, department, doctor, date and time slot: mandatory.
+- Phone: same documented format as Lab 01 (9 digits starting with 6 or 2; optional +237 prefix).
+- Email: optional, but must be valid when supplied.
+- Appointment date: real date strictly after today.
+- Doctor must belong to the selected department.
+- Time slot must be one of the offered slots (08:00-11:00, 14:00-16:00).
+- Reason: 10-500 characters. Consent: mandatory.
+- Initial status is always `Pending`. The same doctor cannot be booked twice for the same date + slot (application check + UNIQUE key).
 
 All validation runs on the server (the form uses `novalidate` so that the server messages can be demonstrated; browser attributes such as `required`/`type` are kept only to help users). Each field shows its own message and keeps the typed (HTML-escaped) value after a rejected submission.
 
 ## Database design
-`loans` (PK `loan_id`, dates, `is_active`, UNIQUE (`student_id`,`isbn`,`is_active`), CHECK due_date > borrow_date).
+`departments`, `doctors` (FK department), `appointments` (PK `id`, status default Pending, UNIQUE (`doctor_id`,`appointment_date`,`time_slot`)).
 
 Business rules are enforced twice: by a friendly check in PHP **and** by a database constraint (so a race condition cannot create a bad row).
 
@@ -41,44 +42,42 @@ Business rules are enforced twice: by a friendly check in PHP **and** by a datab
 - Database errors are logged with `error_log` and the user sees a generic message; no SQL or stack trace is exposed (tested with MySQL stopped).
 
 ## Assumptions
-Returned loans are not modelled by a form (not required). To return a book run: `UPDATE loans SET is_active = NULL, returned_date = CURDATE() WHERE loan_id = ?;` after which the student may borrow that book again (tested).
+Doctors and departments are fictional sample data. The double-booking rule also covers Cancelled rows (delete or move the cancelled booking to free the slot). Do not enter real patient data.
 
 ## Test cases and results
-Executed on 2026-11-07 against PHP 8.3.6 and MariaDB 10.11 by sending real HTTP requests to the form (session + CSRF token). Result: **11 of 11 passed.** All data is fictional.
+Executed on 2026-11-07 against PHP 8.3.6 and MariaDB 10.11 by sending real HTTP requests to the form (session + CSRF token). Result: **12 of 12 passed.** All data is fictional.
 
 | # | Category | Test | Expected | Actual result | Pass |
 |---|---|---|---|---|---|
-| 02-1 | Valid | ISBN-13 loan, 14 days | Saved: Loan recorded | SAVED - Loan recorded. Loan ID #1, due on 2026-11-18. | PASS |
-| 02-2 | Missing required | No student ID, no agreement | Rejected: Student ID is required | REJECTED - Student ID is required. / You must agree to the library rules. / Please correct the highlighted fields and submit again. | PASS |
-| 02-3 | Invalid value | ISBN with wrong check digit | Rejected: valid ISBN | REJECTED - Enter a valid ISBN-10 (X allowed as last character) or ISBN-13. / Please correct the highlighted fields and submit again. | PASS |
-| 02-4 | Invalid value | Due date before borrow date | Rejected: after the borrow date | REJECTED - Due date must be after the borrow date. / Please correct the highlighted fields and submit again. | PASS |
-| 02-5 | Invalid value | Borrow date in the future | Rejected: cannot be in the future | REJECTED - Borrow date cannot be in the future. / Duration does not match the dates (7 days). / Please correct the highlighted fields and submit again. | PASS |
-| 02-6 | Invalid value | Duration does not match dates | Rejected: does not match | REJECTED - Duration does not match the dates (14 days). / Please correct the highlighted fields and submit again. | PASS |
-| 02-7 | Duplicate | Same student borrows the same book again while loan is active | Rejected: already has an active loan | REJECTED - This student already has an active loan for this book. Nothing was saved. / Please correct the highlighted fields and submit again. | PASS |
-| 02-8 | Valid | Same student, different book (ISBN-10 ending in X) | Saved: Loan recorded | SAVED - Loan recorded. Loan ID #2, due on 2026-11-18. | PASS |
-| 02-9 | Valid | Different student may borrow the first book | Saved: Loan recorded | SAVED - Loan recorded. Loan ID #3, due on 2026-11-18. | PASS |
-| 02-CSRF | Security | POST without CSRF token | Rejected: session expired | REJECTED - Your session expired. Please reload the page and try again. | PASS |
-| 02-X | Extension | Extension: active loans listed | HTTP 200 and contains "STU1001" | HTTP 200, contains: True | PASS |
+| 03-1 | Valid | Appointment without email | Saved: saved with status Pending | SAVED - Appointment request #1 saved with status Pending. | PASS |
+| 03-2 | Missing required | No phone, no doctor, no consent | Rejected: Phone is required | REJECTED - Phone is required. / Please choose a doctor. / Consent to data use is required. / Please correct the highlighted fields and submit again. | PASS |
+| 03-3 | Invalid value | Appointment date in the past | Rejected: future date | REJECTED - The appointment must be on a future date. / Please correct the highlighted fields and submit again. | PASS |
+| 03-4 | Invalid value | Reason shorter than 10 characters | Rejected: between 10 and 500 | REJECTED - Must be between 10 and 500 characters (currently 4). / Please correct the highlighted fields and submit again. | PASS |
+| 03-5 | Invalid value | Invalid optional email | Rejected: valid email | REJECTED - Enter a valid email address or leave it empty. / Please correct the highlighted fields and submit again. | PASS |
+| 03-6 | Invalid value | Doctor from another department | Rejected: does not work in the selected department | REJECTED - This doctor does not work in the selected department. / Please correct the highlighted fields and submit again. | PASS |
+| 03-7 | Conflict | Same doctor, date and slot booked by another patient | Rejected: already booked | REJECTED - That doctor is already booked for this date and slot. Choose another slot. Nothing was saved. / Please correct the highlighted fields and submit again. | PASS |
+| 03-8 | Valid | Same doctor and date, different slot | Saved: saved with status Pending | SAVED - Appointment request #2 saved with status Pending. | PASS |
+| 03-9 | Valid | Other doctor, same date and slot, with email | Saved: saved with status Pending | SAVED - Appointment request #3 saved with status Pending. | PASS |
+| 03-CSRF | Security | POST without CSRF token | Rejected: session expired | REJECTED - Your session expired. Please reload the page and try again. | PASS |
+| 03-X | Extension | Extension: schedule grouped by doctor | HTTP 200 and contains "Dr. Neba Fon" | HTTP 200, contains: True | PASS |
+| 03-X | Extension | Extension: filter by doctor | HTTP 200 and contains "Dina Eko" | HTTP 200, contains: True | PASS |
 
 **Database failure test:** with the MySQL server stopped, the page shows "The system could not complete your request because of a database problem. Nothing was saved. Please try again later." No stack trace appears and a POST never reports success.
 
 ## Database evidence (queries run after the tests)
 ```
--- Saved loans
-SELECT loan_id,student_id,isbn,book_title,borrow_date,due_date,loan_days,is_active FROM loans;
-+---------+------------+---------------+----------------------------+-------------+------------+-----------+-----------+
-| loan_id | student_id | isbn          | book_title                 | borrow_date | due_date   | loan_days | is_active |
-+---------+------------+---------------+----------------------------+-------------+------------+-----------+-----------+
-|       1 | STU1001    | 9780306406157 | Introduction to Algorithms | 2026-11-04  | 2026-11-18 |        14 |         1 |
-|       2 | STU1001    | 080442957X    | Another Book               | 2026-11-04  | 2026-11-18 |        14 |         1 |
-|       3 | STU2002    | 9780306406157 | Introduction to Algorithms | 2026-11-04  | 2026-11-18 |        14 |         1 |
-+---------+------------+---------------+----------------------------+-------------+------------+-----------+-----------+
+-- Saved appointments
+SELECT a.id,a.patient_name,a.phone,d.full_name doctor,a.appointment_date,a.time_slot,a.status FROM appointments a JOIN doctors d ON d.id=a.doctor_id;
++----+--------------+-----------+-----------------+------------------+-----------+---------+
+| id | patient_name | phone     | doctor          | appointment_date | time_slot | status  |
++----+--------------+-----------+-----------------+------------------+-----------+---------+
+|  1 | Brenda Tabi  | 699887766 | Dr. Neba Fon    | 2026-11-14       | 09:00:00  | Pending |
+|  2 | Carl Fru     | 655443322 | Dr. Neba Fon    | 2026-11-14       | 10:00:00  | Pending |
+|  3 | Dina Eko     | 699887766 | Dr. Amina Bello | 2026-11-14       | 09:00:00  | Pending |
++----+--------------+-----------+-----------------+------------------+-----------+---------+
 
--- Duplicate active loans (must be empty)
-SELECT student_id,isbn,COUNT(*) c FROM loans WHERE is_active=1 GROUP BY student_id,isbn HAVING c>1;
-(no rows)
--- Return the first loan, then the same student can borrow it again
-UPDATE loans SET is_active=NULL, returned_date=CURDATE() WHERE loan_id=(SELECT m FROM (SELECT MIN(loan_id) m FROM loans) x);
+-- Double bookings (must be empty)
+SELECT doctor_id,appointment_date,time_slot,COUNT(*) c FROM appointments GROUP BY 1,2,3 HAVING c>1;
 (no rows)
 ```
 
