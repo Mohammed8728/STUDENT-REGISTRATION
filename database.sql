@@ -1,51 +1,28 @@
--- LAB 03 - Clinic Appointment Booking
-CREATE DATABASE IF NOT EXISTS lab03_clinic CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE lab03_clinic;
+-- LAB 04 - E-Commerce Product Entry
+CREATE DATABASE IF NOT EXISTS lab04_shop CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE lab04_shop;
 
-CREATE TABLE IF NOT EXISTS departments (
+CREATE TABLE IF NOT EXISTS categories (
     id   TINYINT UNSIGNED NOT NULL AUTO_INCREMENT,
     name VARCHAR(60) NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uq_department_name (name)
+    UNIQUE KEY uq_category_name (name)
 ) ENGINE=InnoDB;
+INSERT IGNORE INTO categories (name) VALUES ('Electronics'), ('Clothing'), ('Food & Drinks'), ('Household'), ('Stationery');
 
-CREATE TABLE IF NOT EXISTS doctors (
-    id            SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    full_name     VARCHAR(80) NOT NULL,
-    department_id TINYINT UNSIGNED NOT NULL,
+CREATE TABLE IF NOT EXISTS products (
+    id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name         VARCHAR(100) NOT NULL,
+    sku          VARCHAR(40)  NOT NULL,                              -- stored upper-case
+    category_id  TINYINT UNSIGNED NOT NULL,
+    unit_price   DECIMAL(12,2) NOT NULL,                             -- XAF
+    quantity     INT UNSIGNED NOT NULL DEFAULT 0,
+    description  VARCHAR(1000) NULL,
+    image_file   VARCHAR(40)  NULL,                                  -- server-generated file name only (e.g. 3f9a...c1.jpg)
+    is_available TINYINT(1)   NOT NULL DEFAULT 0,
+    created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    CONSTRAINT fk_doctor_department FOREIGN KEY (department_id) REFERENCES departments (id)
-) ENGINE=InnoDB;
-
--- Fictional sample staff (no real people)
-INSERT IGNORE INTO departments (name) VALUES ('General Medicine'), ('Paediatrics'), ('Cardiology'), ('Dermatology');
-INSERT INTO doctors (full_name, department_id)
-SELECT * FROM (
-    SELECT 'Dr. Neba Fon' AS n, (SELECT id FROM departments WHERE name='General Medicine') AS d UNION ALL
-    SELECT 'Dr. Amina Bello', (SELECT id FROM departments WHERE name='General Medicine') UNION ALL
-    SELECT 'Dr. Paul Etoga', (SELECT id FROM departments WHERE name='Paediatrics') UNION ALL
-    SELECT 'Dr. Grace Mbarga', (SELECT id FROM departments WHERE name='Cardiology') UNION ALL
-    SELECT 'Dr. Samuel Ndzi', (SELECT id FROM departments WHERE name='Dermatology')
-) seed WHERE NOT EXISTS (SELECT 1 FROM doctors);
-
-CREATE TABLE IF NOT EXISTS appointments (
-    id               INT UNSIGNED NOT NULL AUTO_INCREMENT,
-    patient_name     VARCHAR(80)  NOT NULL,
-    email            VARCHAR(190) NULL,                            -- optional
-    phone            CHAR(9)      NOT NULL,
-    department_id    TINYINT UNSIGNED NOT NULL,
-    doctor_id        SMALLINT UNSIGNED NOT NULL,
-    appointment_date DATE         NOT NULL,
-    time_slot        TIME         NOT NULL,
-    reason           VARCHAR(500) NOT NULL,
-    consent          TINYINT(1)   NOT NULL,
-    status           ENUM('Pending','Confirmed','Cancelled','Completed') NOT NULL DEFAULT 'Pending',
-    created_at       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    -- A doctor cannot be double-booked for the same date + slot (also true for cancelled rows;
-    -- delete or move a cancelled booking to free the slot).
-    UNIQUE KEY uq_doctor_slot (doctor_id, appointment_date, time_slot),
-    CONSTRAINT fk_appt_department FOREIGN KEY (department_id) REFERENCES departments (id),
-    CONSTRAINT fk_appt_doctor     FOREIGN KEY (doctor_id)     REFERENCES doctors (id),
-    CONSTRAINT chk_consent CHECK (consent = 1)
+    UNIQUE KEY uq_product_sku (sku),                                 -- no duplicate SKUs
+    CONSTRAINT fk_product_category FOREIGN KEY (category_id) REFERENCES categories (id),
+    CONSTRAINT chk_price CHECK (unit_price > 0)
 ) ENGINE=InnoDB;

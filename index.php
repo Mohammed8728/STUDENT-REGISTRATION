@@ -1,18 +1,18 @@
 <?php
 declare(strict_types=1);
 /*
- * Lab 03 - Clinic Appointments
+ * Lab 04 - Product Entry
  * ONE FILE = everything: settings, helpers, HTML form (Task A), PHP validation (Task B),
  * database insert (Task C) and the extension page (open index.php?view=list).
  * Styling is in style.css, the database is created by database.sql.
  */
 
 /* ============ 1. SETTINGS (change the MySQL login here if needed; XAMPP default shown) ============ */
-$DB = ['host' => 'localhost', 'name' => 'lab03_clinic', 'user' => 'root', 'pass' => ''];
-$APP_TITLE = 'Lab 03 - Clinic Appointments';
+$DB = ['host' => 'localhost', 'name' => 'lab04_shop', 'user' => 'root', 'pass' => ''];
+$APP_TITLE = 'Lab 04 - Product Entry';
 $NAV = [
-    'index.php' => 'Book appointment',
-    'index.php?view=list' => 'Schedule by doctor',
+    'index.php' => 'Add product',
+    'index.php?view=list' => 'Inventory',
 ];
 
 /* ============ 2. HELPER FUNCTIONS ============ */
@@ -152,23 +152,66 @@ function is_duplicate(PDOException $e): bool
     return ($e->errorInfo[1] ?? 0) === 1062;
 }
 
+/* ============ 4. SAFE IMAGE UPLOAD ============ */
+/**
+ * Validates an OPTIONAL image upload on the server (never trusts the browser).
+ * Returns ['tmp'=>..., 'ext'=>'jpg|png'] when a valid file was sent, null when
+ * no file was sent or when it is invalid (then $errors[$field] is set).
+ */
+function check_image(string $field, int $maxBytes, array &$errors): ?array
+{
+    $f = $_FILES[$field] ?? null;
+    if (!is_array($f) || ($f['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return null;
+    }
+    $limit = number_format($maxBytes / 1048576, 0) . ' MB';
+    if (in_array($f['error'], [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true)) {
+        $errors[$field] = "The file is too large (limit $limit)."; return null;
+    }
+    if ($f['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($f['tmp_name'])) {
+        $errors[$field] = 'The upload failed. Please try again.'; return null;
+    }
+    if ($f['size'] >= $maxBytes) {
+        $errors[$field] = "The file is too large (must be under $limit)."; return null;
+    }
+    // Real content type from the file bytes, not from the name or browser header.
+    $mime = (new finfo(FILEINFO_MIME_TYPE))->file($f['tmp_name']);
+    $allowed = ['image/jpeg' => 'jpg', 'image/png' => 'png'];
+    if (!isset($allowed[$mime]) || @getimagesize($f['tmp_name']) === false) {
+        $errors[$field] = 'Only JPEG or PNG images are allowed.'; return null;
+    }
+    return ['tmp' => $f['tmp_name'], 'ext' => $allowed[$mime]];
+}
+
+/** Stores the file under a random server-generated name; returns that name only. */
+function save_image(array $img, string $dir): string
+{
+    if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
+        throw new RuntimeException('Cannot create upload directory');
+    }
+    // uploaded files must never run as scripts
+    if (!is_file($dir . '/.htaccess')) {
+        @file_put_contents($dir . '/.htaccess', "<FilesMatch \"\\.(php|phtml|phar|php[0-9])$\">\n    Require all denied\n</FilesMatch>\nOptions -Indexes\n");
+    }
+    $name = bin2hex(random_bytes(16)) . '.' . $img['ext'];
+    if (!move_uploaded_file($img['tmp'], $dir . '/' . $name)) {
+        throw new RuntimeException('Cannot store uploaded file');
+    }
+    return $name;
+}
+
 /* ============ 5. LAB CONSTANTS AND FUNCTIONS ============ */
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;       // 2 MB
 
 /* ============ 6. PROCESSING ============ */
 $view = (($_GET['view'] ?? '') === 'list') ? 'list' : 'form';
 
 if ($view === 'form') {
     // ---- the form: validate the POST and insert ----
-    $slots = ['08:00' => '08:00', '09:00' => '09:00', '10:00' => '10:00', '11:00' => '11:00',
-              '14:00' => '14:00', '15:00' => '15:00', '16:00' => '16:00'];
-    $departments = $doctorLabels = $doctorDept = [];
+    $categories = [];
 
     try {
-        $departments = db()->query('SELECT id, name FROM departments ORDER BY name')->fetchAll(PDO::FETCH_KEY_PAIR);
-        foreach (db()->query('SELECT d.id, d.full_name, d.department_id, p.name AS dept FROM doctors d JOIN departments p ON p.id = d.department_id ORDER BY d.full_name') as $r) {
-            $doctorLabels[$r['id']] = $r['full_name'] . ' (' . $r['dept'] . ')';
-            $doctorDept[$r['id']] = (string)$r['department_id'];
-        }
+        $categories = db()->query('SELECT id, name FROM categories ORDER BY name')->fetchAll(PDO::FETCH_KEY_PAIR);
     } catch (PDOException $ex) {
         $errors['_form'] = db_fail($ex);
     }
@@ -177,84 +220,72 @@ if ($view === 'form') {
         if (!csrf_ok()) {
             $errors['_form'] = 'Your session expired. Please reload the page and try again.';
         } else {
-            $name = post('patient_name');
-            $email = strtolower(post('email'));
-            $phone = post('phone');
-            $dept = post('department');
-            $doctor = post('doctor');
-            $date = post('appointment_date');
-            $slot = post('time_slot');
-            $reason = post('reason');
+            $name = post('name');
+            $sku = strtoupper(post('sku'));
+            $cat = post('category');
+            $price = str_replace(',', '.', post('unit_price'));
+            $qty = post('quantity');
+            $desc = post('description');
 
-            if ($name === '') { $errors['patient_name'] = 'Patient name is required.'; }
-            elseif ($m = name_error($name)) { $errors['patient_name'] = $m; }
+            if ($name === '') { $errors['name'] = 'Product name is required.'; }
+            elseif (mb_strlen($name) < 3 || mb_strlen($name) > 100) { $errors['name'] = 'Name must be 3-100 characters.'; }
 
-            if ($email !== '' && (mb_strlen($email) > 190 || !filter_var($email, FILTER_VALIDATE_EMAIL))) { $errors['email'] = 'Enter a valid email address or leave it empty.'; }
+            if ($sku === '') { $errors['sku'] = 'SKU is required.'; }
+            elseif (!preg_match('/^[A-Z0-9][A-Z0-9_-]{2,39}$/', $sku)) { $errors['sku'] = 'SKU must be 3-40 characters: letters, digits, - or _.'; }
 
-            $phoneClean = null;
-            if ($phone === '') { $errors['phone'] = 'Phone is required.'; }
-            elseif (($phoneClean = normalise_phone($phone)) === null) { $errors['phone'] = 'Enter 9 digits starting with 6 or 2 (e.g. 677 123 456).'; }
+            if ($cat === '') { $errors['category'] = 'Please choose a category.'; }
+            elseif (!in_list($cat, $categories)) { $errors['category'] = 'Invalid category selected.'; }
 
-            if ($dept === '') { $errors['department'] = 'Please choose a department.'; }
-            elseif (!in_list($dept, $departments)) { $errors['department'] = 'Invalid department selected.'; }
+            if ($price === '') { $errors['unit_price'] = 'Unit price is required.'; }
+            elseif (!preg_match('/^\d{1,10}(\.\d{1,2})?$/', $price)) { $errors['unit_price'] = 'Enter a number such as 2500 or 2500.50.'; }
+            elseif ((float)$price <= 0) { $errors['unit_price'] = 'Price must be greater than zero.'; }
 
-            if ($doctor === '') { $errors['doctor'] = 'Please choose a doctor.'; }
-            elseif (!in_list($doctor, $doctorLabels)) { $errors['doctor'] = 'Invalid doctor selected.'; }
-            elseif (!isset($errors['department']) && $doctorDept[$doctor] !== $dept) { $errors['doctor'] = 'This doctor does not work in the selected department.'; }
+            if ($qty === '') { $errors['quantity'] = 'Quantity is required.'; }
+            elseif (!preg_match('/^\d{1,9}$/', $qty)) { $errors['quantity'] = 'Quantity must be a whole number, zero or more.'; }
 
-            if ($date === '') { $errors['appointment_date'] = 'Appointment date is required.'; }
-            elseif (parse_date($date) === null) { $errors['appointment_date'] = 'Enter a real date (YYYY-MM-DD).'; }
-            elseif (parse_date($date) <= today()) { $errors['appointment_date'] = 'The appointment must be on a future date.'; }
+            if (mb_strlen($desc) > 1000) { $errors['description'] = 'Description must be 1000 characters or fewer (currently ' . mb_strlen($desc) . ').'; }
 
-            if ($slot === '') { $errors['time_slot'] = 'Please choose a time slot.'; }
-            elseif (!in_list($slot, $slots)) { $errors['time_slot'] = 'Invalid time slot selected.'; }
-
-            $len = mb_strlen($reason);
-            if ($reason === '') { $errors['reason'] = 'Symptoms or reason is required.'; }
-            elseif ($len < 10 || $len > 500) { $errors['reason'] = "Must be between 10 and 500 characters (currently $len)."; }
-
-            if (!checked('consent')) { $errors['consent'] = 'Consent to data use is required.'; }
+            $img = check_image('image', MAX_IMAGE_BYTES, $errors);
 
             if (!$errors) {
+                $stored = null;
                 try {
-                    $st = db()->prepare('SELECT 1 FROM appointments WHERE doctor_id = ? AND appointment_date = ? AND time_slot = ?');
-                    $st->execute([(int)$doctor, $date, $slot . ':00']);
+                    $st = db()->prepare('SELECT 1 FROM products WHERE sku = ?');
+                    $st->execute([$sku]);
                     if ($st->fetchColumn()) {
-                        $errors['time_slot'] = 'That doctor is already booked for this date and slot. Choose another slot. Nothing was saved.';
+                        $errors['sku'] = 'This SKU already exists. Choose a different SKU. Nothing was saved.';
                     } else {
-                        $ins = db()->prepare("INSERT INTO appointments (patient_name, email, phone, department_id, doctor_id, appointment_date, time_slot, reason, consent, status)
-                                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'Pending')");
-                        $ok = $ins->execute([$name, $email === '' ? null : $email, $phoneClean, (int)$dept, (int)$doctor, $date, $slot . ':00', $reason]);
+                        $stored = $img ? save_image($img, __DIR__ . '/uploads') : null;
+                        $ins = db()->prepare('INSERT INTO products (name, sku, category_id, unit_price, quantity, description, image_file, is_available)
+                                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+                        $ok = $ins->execute([$name, $sku, (int)$cat, $price, (int)$qty, $desc === '' ? null : $desc, $stored, checked('available') ? 1 : 0]);
                         if ($ok && $ins->rowCount() === 1) {
-                            flash_set('Appointment request #' . db()->lastInsertId() . ' saved with status Pending.');
+                            flash_set('Product "' . $name . '" saved with ID #' . db()->lastInsertId() . '.');
                             header('Location: index.php');
                             exit;
                         }
-                        $errors['_form'] = 'The appointment could not be saved. Please try again.';
+                        $errors['_form'] = 'The product could not be saved. Please try again.';
                     }
-                } catch (PDOException $ex) {
-                    if (is_duplicate($ex)) { $errors['time_slot'] = 'That doctor is already booked for this date and slot. Nothing was saved.'; }
-                    else { $errors['_form'] = db_fail($ex); }
+                } catch (PDOException | RuntimeException $ex) {
+                    if ($ex instanceof PDOException && is_duplicate($ex)) { $errors['sku'] = 'This SKU already exists. Nothing was saved.'; }
+                    else { error_log('[Lab04] ' . $ex->getMessage()); $errors['_form'] = 'The product could not be saved because of a system problem. Nothing was saved.'; }
                 }
+                if ($errors && $stored) { @unlink(__DIR__ . '/uploads/' . $stored); }   // no orphan files
             }
         }
     }
 } else {
     // ---- extension challenge page ----
-    // Extension challenge: simple appointment schedule grouped by doctor.
-    $filter = isset($_GET['doctor']) && ctype_digit((string)$_GET['doctor']) ? (int)$_GET['doctor'] : 0;
-    $doctors = $byDoctor = [];
+    // Extension challenge: inventory listing sorted by category (then product name).
+    $rows = [];
     $problem = null;
     try {
-        $doctors = db()->query('SELECT id, full_name FROM doctors ORDER BY full_name')->fetchAll(PDO::FETCH_KEY_PAIR);
-        $sql = 'SELECT d.id AS doctor_id, d.full_name AS doctor, a.appointment_date, TIME_FORMAT(a.time_slot, "%H:%i") AS slot,
-                       a.patient_name, a.status, a.id
-                FROM appointments a JOIN doctors d ON d.id = a.doctor_id';
-        $params = [];
-        if ($filter > 0) { $sql .= ' WHERE d.id = ?'; $params[] = $filter; }
-        $st = db()->prepare($sql . ' ORDER BY d.full_name, a.appointment_date, a.time_slot');
-        $st->execute($params);
-        foreach ($st as $r) { $byDoctor[$r['doctor']][] = $r; }
+        $rows = db()->query(
+            'SELECT c.name AS category, p.name, p.sku, p.unit_price, p.quantity,
+                    IF(p.is_available = 1, "Yes", "No") AS available, p.image_file
+             FROM products p JOIN categories c ON c.id = p.category_id
+             ORDER BY c.name ASC, p.name ASC'
+        )->fetchAll();
     } catch (PDOException $ex) {
         $problem = db_fail($ex);
     }
@@ -262,7 +293,7 @@ if ($view === 'form') {
 }
 
 /* ============ 7. THE PAGE (HTML) ============ */
-$pageTitle = ($view === 'list') ? 'Appointment Schedule by Doctor' : 'Clinic Appointment Booking';
+$pageTitle = ($view === 'list') ? 'Inventory by Category' : 'Add Product (Administrator)';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -287,110 +318,91 @@ $pageTitle = ($view === 'list') ? 'Appointment Schedule by Doctor' : 'Clinic App
     <?php flash_show(); form_error_show(); ?>
 
 <?php if ($view === 'list'): ?>
-<form class="search" method="get" action="index.php">
-    <input type="hidden" name="view" value="list">
-    <label for="doctor" class="muted">Doctor</label>
-    <select id="doctor" name="doctor">
-        <option value="0">All doctors</option>
-        <?php foreach ($doctors as $id => $n): ?>
-            <option value="<?= e($id) ?>"<?= $filter === (int)$id ? ' selected' : '' ?>><?= e($n) ?></option>
-        <?php endforeach; ?>
-    </select>
-    <button type="submit" class="primary">Show</button>
-</form>
-
-<?php if (!$byDoctor): ?>
-    <p class="muted">No appointments booked.</p>
-<?php endif; ?>
-<?php foreach ($byDoctor as $doctor => $rows): ?>
-    <h2><?= e($doctor) ?></h2>
 <?php if (!$rows): ?>
-    <p class="muted">No records found.</p>
+    <p class="muted">No products yet.</p>
 <?php else: ?>
     <div class="table-wrap">
         <table>
-            <thead><tr><th scope="col">Date</th><th scope="col">Time</th><th scope="col">Patient</th><th scope="col">Status</th><th scope="col">Ref #</th></tr></thead>
+            <thead>
+                <tr><th scope="col">Image</th><th scope="col">Category</th><th scope="col">Product</th><th scope="col">SKU</th>
+                    <th scope="col">Price (XAF)</th><th scope="col">Qty</th><th scope="col">For sale</th></tr>
+            </thead>
             <tbody>
             <?php foreach ($rows as $r): ?>
-                <tr><td><?= e($r['appointment_date']) ?></td><td><?= e($r['slot']) ?></td><td><?= e($r['patient_name']) ?></td><td><?= e($r['status']) ?></td><td><?= e($r['id']) ?></td></tr>
+                <tr>
+                    <td>
+                        <?php if ($r['image_file']): ?>
+                            <img class="thumb" src="uploads/<?= e($r['image_file']) ?>" alt="<?= e($r['name']) ?>">
+                        <?php else: ?>-<?php endif; ?>
+                    </td>
+                    <td><?= e($r['category']) ?></td>
+                    <td><?= e($r['name']) ?></td>
+                    <td><?= e($r['sku']) ?></td>
+                    <td><?= e(number_format((float)$r['unit_price'], 2)) ?></td>
+                    <td><?= e($r['quantity']) ?></td>
+                    <td><?= e($r['available']) ?></td>
+                </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
     </div>
-    <p class="muted"><?= count($rows) ?> record(s).</p>
+    <p class="muted"><?= count($rows) ?> product(s).</p>
 <?php endif; ?>
-<?php endforeach; ?>
 <?php else: ?>
-<form method="post" action="index.php" novalidate>
+<form method="post" action="index.php" enctype="multipart/form-data" novalidate>
     <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
 
-    <div class="field<?= cls('patient_name') ?>">
-        <label for="patient_name">Patient name <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="patient_name" name="patient_name" value="<?= val('patient_name') ?>" maxlength="80" autocomplete="name" required<?= aria('patient_name') ?>>
-        <?= err('patient_name') ?>
+    <div class="field<?= cls('name') ?>">
+        <label for="name">Product name <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="name" name="name" value="<?= val('name') ?>" maxlength="100" required<?= aria('name') ?>>
+        <?= err('name') ?>
     </div>
 
-    <div class="field<?= cls('email') ?>">
-        <label for="email">Email (optional)</label>
-        <input type="email" id="email" name="email" value="<?= val('email') ?>" maxlength="190"<?= aria('email') ?>>
-        <?= err('email') ?>
+    <div class="field<?= cls('sku') ?>">
+        <label for="sku">SKU <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="sku" name="sku" value="<?= val('sku') ?>" maxlength="40" placeholder="e.g. ELEC-001" required<?= aria('sku') ?>>
+        <?= err('sku') ?>
     </div>
 
-    <div class="field<?= cls('phone') ?>">
-        <label for="phone">Phone <span class="req" aria-hidden="true">*</span></label>
-        <input type="tel" id="phone" name="phone" value="<?= val('phone') ?>" placeholder="6XX XXX XXX" required<?= aria('phone') ?>>
-        <?= err('phone') ?>
-    </div>
-
-    <div class="field<?= cls('department') ?>">
-        <label for="department">Department <span class="req" aria-hidden="true">*</span></label>
-        <select id="department" name="department" required<?= aria('department') ?>>
+    <div class="field<?= cls('category') ?>">
+        <label for="category">Category <span class="req" aria-hidden="true">*</span></label>
+        <select id="category" name="category" required<?= aria('category') ?>>
             <option value="">Choose an option</option>
-            <?php foreach ($departments as $v => $l): ?>
-                <option value="<?= e($v) ?>"<?= sel('department', (string)$v) ?>><?= e($l) ?></option>
+            <?php foreach ($categories as $v => $l): ?>
+                <option value="<?= e($v) ?>"<?= sel('category', (string)$v) ?>><?= e($l) ?></option>
             <?php endforeach; ?>
         </select>
-        <?= err('department') ?>
+        <?= err('category') ?>
     </div>
 
-    <div class="field<?= cls('doctor') ?>">
-        <label for="doctor">Preferred doctor <span class="req" aria-hidden="true">*</span></label>
-        <select id="doctor" name="doctor" required<?= aria('doctor') ?>>
-            <option value="">Choose an option</option>
-            <?php foreach ($doctorLabels as $v => $l): ?>
-                <option value="<?= e($v) ?>"<?= sel('doctor', (string)$v) ?>><?= e($l) ?></option>
-            <?php endforeach; ?>
-        </select>
-        <?= err('doctor') ?>
+    <div class="field<?= cls('unit_price') ?>">
+        <label for="unit_price">Unit price (XAF) <span class="req" aria-hidden="true">*</span></label>
+        <input type="number" id="unit_price" name="unit_price" value="<?= val('unit_price') ?>" min="0.01" step="0.01" required<?= aria('unit_price') ?>>
+        <?= err('unit_price') ?>
     </div>
 
-    <div class="field<?= cls('appointment_date') ?>">
-        <label for="appointment_date">Appointment date <span class="req" aria-hidden="true">*</span></label>
-        <input type="date" id="appointment_date" name="appointment_date" value="<?= val('appointment_date') ?>" min="<?= e(today()->modify('+1 day')->format('Y-m-d')) ?>" required<?= aria('appointment_date') ?>>
-        <?= err('appointment_date') ?>
+    <div class="field<?= cls('quantity') ?>">
+        <label for="quantity">Quantity <span class="req" aria-hidden="true">*</span></label>
+        <input type="number" id="quantity" name="quantity" value="<?= val('quantity') ?>" min="0" step="1" required<?= aria('quantity') ?>>
+        <?= err('quantity') ?>
     </div>
 
-    <div class="field<?= cls('time_slot') ?>">
-        <label for="time_slot">Time slot <span class="req" aria-hidden="true">*</span></label>
-        <select id="time_slot" name="time_slot" required<?= aria('time_slot') ?>>
-            <option value="">Choose an option</option>
-            <?php foreach ($slots as $v => $l): ?>
-                <option value="<?= e($v) ?>"<?= sel('time_slot', (string)$v) ?>><?= e($l) ?></option>
-            <?php endforeach; ?>
-        </select>
-        <?= err('time_slot') ?>
+    <div class="field<?= cls('description') ?>">
+        <label for="description">Description</label>
+        <textarea id="description" name="description" rows="4" maxlength="1000"<?= aria('description') ?>><?= val('description') ?></textarea>
+        <?= err('description') ?>
     </div>
 
-    <div class="field<?= cls('reason') ?>">
-        <label for="reason">Symptoms or reason <span class="req" aria-hidden="true">*</span></label>
-        <textarea id="reason" name="reason" rows="4" maxlength="500" placeholder="10 to 500 characters" required<?= aria('reason') ?>><?= val('reason') ?></textarea>
-        <?= err('reason') ?>
+    <div class="field<?= cls('image') ?>">
+        <label for="image">Product image (JPEG or PNG, under 2 MB)</label>
+        <input type="file" id="image" name="image" accept="image/jpeg,image/png"<?= aria('image') ?>>
+        <?= err('image') ?>
     </div>
 
-    <div class="field<?= cls('consent') ?>">
-        <span class="legend">Consent to data use <span class="req" aria-hidden="true">*</span></span>
-        <label class="inline" for="consent"><input type="checkbox" id="consent" name="consent" value="1"<?= chkd('consent') ?><?= aria('consent') ?>> I agree</label>
-        <?= err('consent') ?>
+    <div class="field<?= cls('available') ?>">
+        <span class="legend">Available for sale</span>
+        <label class="inline" for="available"><input type="checkbox" id="available" name="available" value="1"<?= chkd('available') ?><?= aria('available') ?>> Yes, available for sale</label>
+        <?= err('available') ?>
     </div>
 
     <div class="buttons">
@@ -398,7 +410,6 @@ $pageTitle = ($view === 'list') ? 'Appointment Schedule by Doctor' : 'Clinic App
         <button type="reset" class="secondary">Reset</button>
     </div>
 </form>
-<p class="muted">Use fictional data only when testing. Do not enter real patient information.</p>
 <?php endif; ?>
 </main>
 </body>
