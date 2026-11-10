@@ -1,18 +1,18 @@
 <?php
 declare(strict_types=1);
 /*
- * Lab 04 - Product Entry
+ * Lab 05 - Event Registration
  * ONE FILE = everything: settings, helpers, HTML form (Task A), PHP validation (Task B),
  * database insert (Task C) and the extension page (open index.php?view=list).
  * Styling is in style.css, the database is created by database.sql.
  */
 
 /* ============ 1. SETTINGS (change the MySQL login here if needed; XAMPP default shown) ============ */
-$DB = ['host' => 'localhost', 'name' => 'lab04_shop', 'user' => 'root', 'pass' => ''];
-$APP_TITLE = 'Lab 04 - Product Entry';
+$DB = ['host' => 'localhost', 'name' => 'lab05_events', 'user' => 'root', 'pass' => ''];
+$APP_TITLE = 'Lab 05 - Event Registration';
 $NAV = [
-    'index.php' => 'Add product',
-    'index.php?view=list' => 'Inventory',
+    'index.php' => 'Register',
+    'index.php?view=list' => 'Totals per workshop',
 ];
 
 /* ============ 2. HELPER FUNCTIONS ============ */
@@ -152,66 +152,20 @@ function is_duplicate(PDOException $e): bool
     return ($e->errorInfo[1] ?? 0) === 1062;
 }
 
-/* ============ 4. SAFE IMAGE UPLOAD ============ */
-/**
- * Validates an OPTIONAL image upload on the server (never trusts the browser).
- * Returns ['tmp'=>..., 'ext'=>'jpg|png'] when a valid file was sent, null when
- * no file was sent or when it is invalid (then $errors[$field] is set).
- */
-function check_image(string $field, int $maxBytes, array &$errors): ?array
-{
-    $f = $_FILES[$field] ?? null;
-    if (!is_array($f) || ($f['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
-        return null;
-    }
-    $limit = number_format($maxBytes / 1048576, 0) . ' MB';
-    if (in_array($f['error'], [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true)) {
-        $errors[$field] = "The file is too large (limit $limit)."; return null;
-    }
-    if ($f['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($f['tmp_name'])) {
-        $errors[$field] = 'The upload failed. Please try again.'; return null;
-    }
-    if ($f['size'] >= $maxBytes) {
-        $errors[$field] = "The file is too large (must be under $limit)."; return null;
-    }
-    // Real content type from the file bytes, not from the name or browser header.
-    $mime = (new finfo(FILEINFO_MIME_TYPE))->file($f['tmp_name']);
-    $allowed = ['image/jpeg' => 'jpg', 'image/png' => 'png'];
-    if (!isset($allowed[$mime]) || @getimagesize($f['tmp_name']) === false) {
-        $errors[$field] = 'Only JPEG or PNG images are allowed.'; return null;
-    }
-    return ['tmp' => $f['tmp_name'], 'ext' => $allowed[$mime]];
-}
-
-/** Stores the file under a random server-generated name; returns that name only. */
-function save_image(array $img, string $dir): string
-{
-    if (!is_dir($dir) && !mkdir($dir, 0755, true)) {
-        throw new RuntimeException('Cannot create upload directory');
-    }
-    // uploaded files must never run as scripts
-    if (!is_file($dir . '/.htaccess')) {
-        @file_put_contents($dir . '/.htaccess', "<FilesMatch \"\\.(php|phtml|phar|php[0-9])$\">\n    Require all denied\n</FilesMatch>\nOptions -Indexes\n");
-    }
-    $name = bin2hex(random_bytes(16)) . '.' . $img['ext'];
-    if (!move_uploaded_file($img['tmp'], $dir . '/' . $name)) {
-        throw new RuntimeException('Cannot store uploaded file');
-    }
-    return $name;
-}
-
 /* ============ 5. LAB CONSTANTS AND FUNCTIONS ============ */
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;       // 2 MB
 
 /* ============ 6. PROCESSING ============ */
 $view = (($_GET['view'] ?? '') === 'list') ? 'list' : 'form';
 
 if ($view === 'form') {
     // ---- the form: validate the POST and insert ----
-    $categories = [];
+    $modes = ['In-person' => 'In-person', 'Online' => 'Online'];
+    $workshops = [];
 
     try {
-        $categories = db()->query('SELECT id, name FROM categories ORDER BY name')->fetchAll(PDO::FETCH_KEY_PAIR);
+        foreach (db()->query('SELECT id, title, workshop_date FROM workshops ORDER BY workshop_date') as $r) {
+            $workshops[$r['id']] = $r['title'] . ' (' . $r['workshop_date'] . ')';
+        }
     } catch (PDOException $ex) {
         $errors['_form'] = db_fail($ex);
     }
@@ -220,71 +174,70 @@ if ($view === 'form') {
         if (!csrf_ok()) {
             $errors['_form'] = 'Your session expired. Please reload the page and try again.';
         } else {
-            $name = post('name');
-            $sku = strtoupper(post('sku'));
-            $cat = post('category');
-            $price = str_replace(',', '.', post('unit_price'));
-            $qty = post('quantity');
-            $desc = post('description');
+            $name = post('participant_name');
+            $email = strtolower(post('email'));
+            $phone = post('phone');
+            $ws = post('workshop');
+            $mode = post('mode');
+            $seats = post('seats');
+            $special = post('special');
 
-            if ($name === '') { $errors['name'] = 'Product name is required.'; }
-            elseif (mb_strlen($name) < 3 || mb_strlen($name) > 100) { $errors['name'] = 'Name must be 3-100 characters.'; }
+            if ($name === '') { $errors['participant_name'] = 'Participant name is required.'; }
+            elseif ($m = name_error($name)) { $errors['participant_name'] = $m; }
 
-            if ($sku === '') { $errors['sku'] = 'SKU is required.'; }
-            elseif (!preg_match('/^[A-Z0-9][A-Z0-9_-]{2,39}$/', $sku)) { $errors['sku'] = 'SKU must be 3-40 characters: letters, digits, - or _.'; }
+            if ($email === '') { $errors['email'] = 'Email is required.'; }
+            elseif (mb_strlen($email) > 190 || !filter_var($email, FILTER_VALIDATE_EMAIL)) { $errors['email'] = 'Enter a valid email address.'; }
 
-            if ($cat === '') { $errors['category'] = 'Please choose a category.'; }
-            elseif (!in_list($cat, $categories)) { $errors['category'] = 'Invalid category selected.'; }
+            $phoneClean = null;
+            if ($phone !== '' && ($phoneClean = normalise_phone($phone)) === null) { $errors['phone'] = 'Enter 9 digits starting with 6 or 2, or leave empty.'; }
 
-            if ($price === '') { $errors['unit_price'] = 'Unit price is required.'; }
-            elseif (!preg_match('/^\d{1,10}(\.\d{1,2})?$/', $price)) { $errors['unit_price'] = 'Enter a number such as 2500 or 2500.50.'; }
-            elseif ((float)$price <= 0) { $errors['unit_price'] = 'Price must be greater than zero.'; }
+            if ($ws === '') { $errors['workshop'] = 'Please choose a workshop.'; }
+            elseif (!in_list($ws, $workshops)) { $errors['workshop'] = 'Invalid workshop selected.'; }
 
-            if ($qty === '') { $errors['quantity'] = 'Quantity is required.'; }
-            elseif (!preg_match('/^\d{1,9}$/', $qty)) { $errors['quantity'] = 'Quantity must be a whole number, zero or more.'; }
+            if ($mode === '') { $errors['mode'] = 'Please choose an attendance mode.'; }
+            elseif (!in_list($mode, $modes)) { $errors['mode'] = 'Invalid attendance mode.'; }
 
-            if (mb_strlen($desc) > 1000) { $errors['description'] = 'Description must be 1000 characters or fewer (currently ' . mb_strlen($desc) . ').'; }
+            if ($seats === '') { $errors['seats'] = 'Number of seats is required.'; }
+            elseif (!preg_match('/^[1-3]$/', $seats)) { $errors['seats'] = 'Seats must be a whole number from 1 to 3.'; }
 
-            $img = check_image('image', MAX_IMAGE_BYTES, $errors);
+            if (mb_strlen($special) > 300) { $errors['special'] = 'Maximum 300 characters (currently ' . mb_strlen($special) . ').'; }
+            if (!checked('terms')) { $errors['terms'] = 'You must accept the event terms.'; }
 
             if (!$errors) {
-                $stored = null;
                 try {
-                    $st = db()->prepare('SELECT 1 FROM products WHERE sku = ?');
-                    $st->execute([$sku]);
+                    $st = db()->prepare('SELECT 1 FROM registrations WHERE email = ? AND workshop_id = ?');
+                    $st->execute([$email, (int)$ws]);
                     if ($st->fetchColumn()) {
-                        $errors['sku'] = 'This SKU already exists. Choose a different SKU. Nothing was saved.';
+                        $errors['email'] = 'This email is already registered for this workshop. Nothing was saved.';
                     } else {
-                        $stored = $img ? save_image($img, __DIR__ . '/uploads') : null;
-                        $ins = db()->prepare('INSERT INTO products (name, sku, category_id, unit_price, quantity, description, image_file, is_available)
-                                              VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-                        $ok = $ins->execute([$name, $sku, (int)$cat, $price, (int)$qty, $desc === '' ? null : $desc, $stored, checked('available') ? 1 : 0]);
+                        $ins = db()->prepare('INSERT INTO registrations (participant_name, email, phone, workshop_id, attendance_mode, seats, special_requirements, terms_accepted)
+                                              VALUES (?, ?, ?, ?, ?, ?, ?, 1)');
+                        $ok = $ins->execute([$name, $email, $phoneClean, (int)$ws, $mode, (int)$seats, $special === '' ? null : $special]);
                         if ($ok && $ins->rowCount() === 1) {
-                            flash_set('Product "' . $name . '" saved with ID #' . db()->lastInsertId() . '.');
+                            flash_set('Registration #' . db()->lastInsertId() . ' confirmed for ' . $seats . ' seat(s).');
                             header('Location: index.php');
                             exit;
                         }
-                        $errors['_form'] = 'The product could not be saved. Please try again.';
+                        $errors['_form'] = 'The registration could not be saved. Please try again.';
                     }
-                } catch (PDOException | RuntimeException $ex) {
-                    if ($ex instanceof PDOException && is_duplicate($ex)) { $errors['sku'] = 'This SKU already exists. Nothing was saved.'; }
-                    else { error_log('[Lab04] ' . $ex->getMessage()); $errors['_form'] = 'The product could not be saved because of a system problem. Nothing was saved.'; }
+                } catch (PDOException $ex) {
+                    if (is_duplicate($ex)) { $errors['email'] = 'This email is already registered for this workshop. Nothing was saved.'; }
+                    else { $errors['_form'] = db_fail($ex); }
                 }
-                if ($errors && $stored) { @unlink(__DIR__ . '/uploads/' . $stored); }   // no orphan files
             }
         }
     }
 } else {
     // ---- extension challenge page ----
-    // Extension challenge: inventory listing sorted by category (then product name).
+    // Extension challenge: registration totals per workshop (workshops without registrations show 0).
     $rows = [];
     $problem = null;
     try {
         $rows = db()->query(
-            'SELECT c.name AS category, p.name, p.sku, p.unit_price, p.quantity,
-                    IF(p.is_available = 1, "Yes", "No") AS available, p.image_file
-             FROM products p JOIN categories c ON c.id = p.category_id
-             ORDER BY c.name ASC, p.name ASC'
+            'SELECT w.title, w.workshop_date, COUNT(r.id) AS registrations, COALESCE(SUM(r.seats), 0) AS total_seats,
+                    COALESCE(SUM(r.attendance_mode = "In-person"), 0) AS in_person, COALESCE(SUM(r.attendance_mode = "Online"), 0) AS online
+             FROM workshops w LEFT JOIN registrations r ON r.workshop_id = w.id
+             GROUP BY w.id, w.title, w.workshop_date ORDER BY w.workshop_date'
         )->fetchAll();
     } catch (PDOException $ex) {
         $problem = db_fail($ex);
@@ -293,7 +246,7 @@ if ($view === 'form') {
 }
 
 /* ============ 7. THE PAGE (HTML) ============ */
-$pageTitle = ($view === 'list') ? 'Inventory by Category' : 'Add Product (Administrator)';
+$pageTitle = ($view === 'list') ? 'Registration Totals per Workshop' : 'Workshop Registration';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -319,90 +272,81 @@ $pageTitle = ($view === 'list') ? 'Inventory by Category' : 'Add Product (Admini
 
 <?php if ($view === 'list'): ?>
 <?php if (!$rows): ?>
-    <p class="muted">No products yet.</p>
+    <p class="muted">No records found.</p>
 <?php else: ?>
     <div class="table-wrap">
         <table>
-            <thead>
-                <tr><th scope="col">Image</th><th scope="col">Category</th><th scope="col">Product</th><th scope="col">SKU</th>
-                    <th scope="col">Price (XAF)</th><th scope="col">Qty</th><th scope="col">For sale</th></tr>
-            </thead>
+            <thead><tr><th scope="col">Workshop</th><th scope="col">Date</th><th scope="col">Registrations</th><th scope="col">Total seats</th><th scope="col">In-person</th><th scope="col">Online</th></tr></thead>
             <tbody>
             <?php foreach ($rows as $r): ?>
-                <tr>
-                    <td>
-                        <?php if ($r['image_file']): ?>
-                            <img class="thumb" src="uploads/<?= e($r['image_file']) ?>" alt="<?= e($r['name']) ?>">
-                        <?php else: ?>-<?php endif; ?>
-                    </td>
-                    <td><?= e($r['category']) ?></td>
-                    <td><?= e($r['name']) ?></td>
-                    <td><?= e($r['sku']) ?></td>
-                    <td><?= e(number_format((float)$r['unit_price'], 2)) ?></td>
-                    <td><?= e($r['quantity']) ?></td>
-                    <td><?= e($r['available']) ?></td>
-                </tr>
+                <tr><td><?= e($r['title']) ?></td><td><?= e($r['workshop_date']) ?></td><td><?= e($r['registrations']) ?></td><td><?= e($r['total_seats']) ?></td><td><?= e($r['in_person']) ?></td><td><?= e($r['online']) ?></td></tr>
             <?php endforeach; ?>
             </tbody>
         </table>
     </div>
-    <p class="muted"><?= count($rows) ?> product(s).</p>
+    <p class="muted"><?= count($rows) ?> record(s).</p>
 <?php endif; ?>
 <?php else: ?>
-<form method="post" action="index.php" enctype="multipart/form-data" novalidate>
+<form method="post" action="index.php" novalidate>
     <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
 
-    <div class="field<?= cls('name') ?>">
-        <label for="name">Product name <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="name" name="name" value="<?= val('name') ?>" maxlength="100" required<?= aria('name') ?>>
-        <?= err('name') ?>
+    <div class="field<?= cls('participant_name') ?>">
+        <label for="participant_name">Participant name <span class="req" aria-hidden="true">*</span></label>
+        <input type="text" id="participant_name" name="participant_name" value="<?= val('participant_name') ?>" maxlength="80" required<?= aria('participant_name') ?>>
+        <?= err('participant_name') ?>
     </div>
 
-    <div class="field<?= cls('sku') ?>">
-        <label for="sku">SKU <span class="req" aria-hidden="true">*</span></label>
-        <input type="text" id="sku" name="sku" value="<?= val('sku') ?>" maxlength="40" placeholder="e.g. ELEC-001" required<?= aria('sku') ?>>
-        <?= err('sku') ?>
+    <div class="field<?= cls('email') ?>">
+        <label for="email">Email <span class="req" aria-hidden="true">*</span></label>
+        <input type="email" id="email" name="email" value="<?= val('email') ?>" maxlength="190" required<?= aria('email') ?>>
+        <?= err('email') ?>
     </div>
 
-    <div class="field<?= cls('category') ?>">
-        <label for="category">Category <span class="req" aria-hidden="true">*</span></label>
-        <select id="category" name="category" required<?= aria('category') ?>>
+    <div class="field<?= cls('phone') ?>">
+        <label for="phone">Phone (optional)</label>
+        <input type="tel" id="phone" name="phone" value="<?= val('phone') ?>" placeholder="6XX XXX XXX"<?= aria('phone') ?>>
+        <?= err('phone') ?>
+    </div>
+
+    <div class="field<?= cls('workshop') ?>">
+        <label for="workshop">Workshop <span class="req" aria-hidden="true">*</span></label>
+        <select id="workshop" name="workshop" required<?= aria('workshop') ?>>
             <option value="">Choose an option</option>
-            <?php foreach ($categories as $v => $l): ?>
-                <option value="<?= e($v) ?>"<?= sel('category', (string)$v) ?>><?= e($l) ?></option>
+            <?php foreach ($workshops as $v => $l): ?>
+                <option value="<?= e($v) ?>"<?= sel('workshop', (string)$v) ?>><?= e($l) ?></option>
             <?php endforeach; ?>
         </select>
-        <?= err('category') ?>
+        <?= err('workshop') ?>
     </div>
 
-    <div class="field<?= cls('unit_price') ?>">
-        <label for="unit_price">Unit price (XAF) <span class="req" aria-hidden="true">*</span></label>
-        <input type="number" id="unit_price" name="unit_price" value="<?= val('unit_price') ?>" min="0.01" step="0.01" required<?= aria('unit_price') ?>>
-        <?= err('unit_price') ?>
+    <div class="field<?= cls('mode') ?>">
+        <fieldset>
+            <legend>Attendance mode <span class="req" aria-hidden="true">*</span></legend>
+            <div class="choices">
+                <?php foreach ($modes as $v => $l): ?>
+                    <label class="inline"><input type="radio" name="mode" value="<?= e($v) ?>"<?= chkd('mode', (string)$v) ?>> <?= e($l) ?></label>
+                <?php endforeach; ?>
+            </div>
+        </fieldset>
+        <?= err('mode') ?>
     </div>
 
-    <div class="field<?= cls('quantity') ?>">
-        <label for="quantity">Quantity <span class="req" aria-hidden="true">*</span></label>
-        <input type="number" id="quantity" name="quantity" value="<?= val('quantity') ?>" min="0" step="1" required<?= aria('quantity') ?>>
-        <?= err('quantity') ?>
+    <div class="field<?= cls('seats') ?>">
+        <label for="seats">Number of seats (1-3) <span class="req" aria-hidden="true">*</span></label>
+        <input type="number" id="seats" name="seats" value="<?= val('seats') ?>" min="1" max="3" step="1" required<?= aria('seats') ?>>
+        <?= err('seats') ?>
     </div>
 
-    <div class="field<?= cls('description') ?>">
-        <label for="description">Description</label>
-        <textarea id="description" name="description" rows="4" maxlength="1000"<?= aria('description') ?>><?= val('description') ?></textarea>
-        <?= err('description') ?>
+    <div class="field<?= cls('special') ?>">
+        <label for="special">Special requirements</label>
+        <textarea id="special" name="special" rows="4" maxlength="300"<?= aria('special') ?>><?= val('special') ?></textarea>
+        <?= err('special') ?>
     </div>
 
-    <div class="field<?= cls('image') ?>">
-        <label for="image">Product image (JPEG or PNG, under 2 MB)</label>
-        <input type="file" id="image" name="image" accept="image/jpeg,image/png"<?= aria('image') ?>>
-        <?= err('image') ?>
-    </div>
-
-    <div class="field<?= cls('available') ?>">
-        <span class="legend">Available for sale</span>
-        <label class="inline" for="available"><input type="checkbox" id="available" name="available" value="1"<?= chkd('available') ?><?= aria('available') ?>> Yes, available for sale</label>
-        <?= err('available') ?>
+    <div class="field<?= cls('terms') ?>">
+        <span class="legend">Accept event terms <span class="req" aria-hidden="true">*</span></span>
+        <label class="inline" for="terms"><input type="checkbox" id="terms" name="terms" value="1"<?= chkd('terms') ?><?= aria('terms') ?>> I agree</label>
+        <?= err('terms') ?>
     </div>
 
     <div class="buttons">
